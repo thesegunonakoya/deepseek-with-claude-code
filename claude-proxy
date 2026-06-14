@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+'use strict';
+
+const http = require('http');
+const https = require('https');
+
+const PORT = process.env.CLAUDE_PROXY_PORT || 3456;
+const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY;
+
+if (!DEEPSEEK_KEY) {
+  process.stderr.write('claude-proxy: DEEPSEEK_API_KEY not set\n');
+  process.exit(1);
+}
+
+function isDeepSeekRequest(body) {
+  try {
+    const { model = '' } = JSON.parse(body);
+    return model.startsWith('deepseek');
+  } catch {
+    return false;
+  }
+}
+
+const server = http.createServer((req, res) => {
+  const chunks = [];
+
+  req.on('data', chunk => chunks.push(chunk));
+
+  req.on('end', () => {
+    const body = Buffer.concat(chunks);
+    const deepseek = isDeepSeekRequest(body);
+
+    const targetHost = deepseek ? 'api.deepseek.com' : 'api.anthropic.com';
+    const headers = { ...req.headers, host: targetHost, 'content-length': body.length };
+
+    if (deepseek) {
+      headers['x-api-key'] = DEEPSEEK_KEY;
+      headers['authorization'] = `Bearer ${DEEPSEEK_KEY}`;
+    }
+
+    const options = {
+      hostname: targetHost,
+      port: 443,
+      path: req.url,
+      method: req.method,
+      headers,
+    };
+
+    const proxyReq = https.request(options, proxyRes => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', err => {
+      if (!res.headersSent) res.writeHead(502);
+      res.end(`proxy error: ${err.message}`);
+    });
+
+    proxyReq.end(body);
+  });
+
+  req.on('error', err => {
+    res.writeHead(400);
+    res.end(err.message);
+  });
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  process.stderr.write(`claude-proxy on :${PORT} — anthropic + deepseek\n`);
+});
